@@ -24,13 +24,16 @@
 #include <QString>
 #include <QStringList>
 
-#include <atomic>
-#include <functional>
+#include "xbinary.h"
 
 // Front-end-agnostic driver around the XEmulUnpacker engine. Loads a packed
 // executable, single-steps its loader stub in the emulator until the transfer to
 // the original entry point, and writes the reconstructed image out. The packer can
 // be auto (generic heuristic) or one of the packer-specific unpackers.
+//
+// Progress + cancellation flow through the caller's XBinary::PDSTRUCT (status lines via
+// the info string + callback, cancellation via isPdStructStopped) -- there is no separate
+// log callback or cancel flag.
 class EmulatorUnpacker
 {
 public:
@@ -45,7 +48,6 @@ public:
         bool fixImports = true;      // reconstruct the import table so the dump is runnable
         bool fixRelocations = true;  // reconstruct base relocations (two-base diff) for relocatable images
         bool saveOverlay = false;    // append the original packed file's overlay to the output
-        const std::atomic_bool *cancelFlag = nullptr;  // caller-owned; set true to abort the run
     };
 
     struct Result
@@ -66,16 +68,13 @@ public:
         QStringList apiLog;          // emulated OS/API calls the stub made
     };
 
-    // Live log sink; receives one line per engine message as it is produced.
-    using LogCallback = std::function<void(const QString &)>;
-
     // Names selectable in Options::packerName (generic first, then each packer family).
     static QStringList availablePackers();
     static QString genericPackerName();
 
     static QString defaultResultDirectory(const QString &inputPath);
     static QString resultOutputPath(const QString &inputPath, const QString &resultDirectory, const QString &methodName);
-    static Result unpack(const Options &options, const LogCallback &onLog = LogCallback());
+    static Result unpack(const Options &options, XBinary::PDSTRUCT *pPdStruct);
 };
 
 #endif  // EMULATORUNPACKER_H

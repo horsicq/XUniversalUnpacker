@@ -51,6 +51,24 @@ QString safeMethodName(const QString &methodName)
     return result.isEmpty() ? QStringLiteral("unknown") : result;
 }
 
+// Append one summary line to the result and stream it live through the PDSTRUCT (info string
+// + unthrottled callback). Named helpers rather than inline lambdas, per the project's style.
+void logLine(EmulatorUnpacker::Result *pResult, XBinary::PDSTRUCT *pPdStruct, const QString &sMessage)
+{
+    pResult->messages << sMessage;
+    if(pPdStruct) {
+        XBinary::setPdStructInfoString(pPdStruct, sMessage);
+        XBinary::invokePdStructCallback(pPdStruct, 0);
+    }
+}
+
+// Log a message and return the (failed) result -- the return-site replacement for the old fail() lambda.
+EmulatorUnpacker::Result failResult(EmulatorUnpacker::Result *pResult, XBinary::PDSTRUCT *pPdStruct, const QString &sMessage)
+{
+    logLine(pResult, pPdStruct, sMessage);
+    return *pResult;
+}
+
 }  // namespace
 
 QStringList EmulatorUnpacker::availablePackers()
@@ -99,51 +117,39 @@ QString EmulatorUnpacker::resultOutputPath(const QString &inputPath, const QStri
     return QFileInfo(QDir(QDir(rootDirectory).filePath(outputDirectoryName)).filePath(outputFileName)).absoluteFilePath();
 }
 
-EmulatorUnpacker::Result EmulatorUnpacker::unpack(const Options &options, const LogCallback &onLog)
+EmulatorUnpacker::Result EmulatorUnpacker::unpack(const Options &options, XBinary::PDSTRUCT *pPdStruct)
 {
     Result result;
     const QString inputPath = options.inputPath.trimmed();
     const QString resultDirectory = options.resultDirectory.trimmed().isEmpty() ? defaultResultDirectory(inputPath) : options.resultDirectory.trimmed();
 
-    auto log = [&onLog, &result](const QString &message) {
-        result.messages << message;
-        if(onLog) {
-            onLog(message);
-        }
-    };
-
-    auto fail = [&result, &log](const QString &message) {
-        log(message);
-        return result;
-    };
-
     if(inputPath.isEmpty()) {
-        return fail(QStringLiteral("Input file is not set."));
+        return failResult(&result, pPdStruct, QStringLiteral("Input file is not set."));
     }
 
     const QFileInfo inputInfo(inputPath);
     if(!inputInfo.exists() || !inputInfo.isFile()) {
-        return fail(QStringLiteral("Input file does not exist: %1").arg(inputPath));
+        return failResult(&result, pPdStruct, QStringLiteral("Input file does not exist: %1").arg(inputPath));
     }
 
     if(resultDirectory.isEmpty()) {
-        return fail(QStringLiteral("Result directory is not set."));
+        return failResult(&result, pPdStruct, QStringLiteral("Result directory is not set."));
     }
 
     const QFileInfo resultDirectoryInfo(resultDirectory);
     if(resultDirectoryInfo.exists() && !resultDirectoryInfo.isDir()) {
-        return fail(QStringLiteral("Result directory is not a directory: %1").arg(resultDirectoryInfo.absoluteFilePath()));
+        return failResult(&result, pPdStruct, QStringLiteral("Result directory is not a directory: %1").arg(resultDirectoryInfo.absoluteFilePath()));
     }
 
     // Hash + size of the input for the report.
     {
         QFile inputFile(inputInfo.absoluteFilePath());
         if(!inputFile.open(QIODevice::ReadOnly)) {
-            return fail(QStringLiteral("Cannot open input file: %1").arg(inputFile.errorString()));
+            return failResult(&result, pPdStruct, QStringLiteral("Cannot open input file: %1").arg(inputFile.errorString()));
         }
         QCryptographicHash hash(QCryptographicHash::Sha256);
         if(!hash.addData(&inputFile)) {
-            return fail(QStringLiteral("Cannot read input file: %1").arg(inputFile.errorString()));
+            return failResult(&result, pPdStruct, QStringLiteral("Cannot read input file: %1").arg(inputFile.errorString()));
         }
         result.inputSha256 = QString::fromLatin1(hash.result().toHex());
         result.inputSize = inputInfo.size();
@@ -157,32 +163,24 @@ EmulatorUnpacker::Result EmulatorUnpacker::unpack(const Options &options, const 
     if(options.packerName.isEmpty() || (options.packerName == XEmulUnpackerFactory::genericName())) {
         const PackerDetect::RESULT detection = PackerDetect::detect(inputInfo.absoluteFilePath());
         if(detection.bDetected) {
-            log(QStringLiteral("Detected: %1").arg(detection.sDetectedInfo));
+            logLine(&result, pPdStruct, QStringLiteral("Detected: %1").arg(detection.sDetectedInfo));
         }
         if(!detection.sFactoryName.isEmpty()) {
             sEffectivePacker = detection.sFactoryName;
-            log(QStringLiteral("Auto-selected unpacker: %1").arg(sEffectivePacker));
+            logLine(&result, pPdStruct, QStringLiteral("Auto-selected unpacker: %1").arg(sEffectivePacker));
         }
     }
 
+    // The engine reports its own progress/diagnostics and honours cancellation directly through
+    // pPdStruct -- no signal wiring or stop flag to set here.
     QScopedPointer<XEmulUnpacker> unpacker(XEmulUnpackerFactory::create(sEffectivePacker));
-    unpacker->setStopFlag(options.cancelFlag);
     result.packerName = unpacker->getPackerName();
 
-    if(onLog) {
-        QObject::connect(unpacker.data(), &XEmulUnpacker::infoMessage, unpacker.data(),
-                         [&onLog](const QString &text) { onLog(text); });
-        QObject::connect(unpacker.data(), &XEmulUnpacker::oepDetected, unpacker.data(),
-                         [&onLog](quint64 oepRva, const QString &method) {
-                             onLog(QStringLiteral("OEP detected: RVA 0x%1 (%2)").arg(oepRva, 0, 16).arg(method));
-                         });
-    }
-
-    log(QStringLiteral("Input:  %1").arg(inputInfo.absoluteFilePath()));
-    log(QStringLiteral("Size:   %1 bytes").arg(result.inputSize));
-    log(QStringLiteral("SHA256: %1").arg(result.inputSha256));
-    log(QStringLiteral("Packer: %1").arg(result.packerName));
-    log(QStringLiteral("Running emulator..."));
+    logLine(&result, pPdStruct, QStringLiteral("Input:  %1").arg(inputInfo.absoluteFilePath()));
+    logLine(&result, pPdStruct, QStringLiteral("Size:   %1 bytes").arg(result.inputSize));
+    logLine(&result, pPdStruct, QStringLiteral("SHA256: %1").arg(result.inputSha256));
+    logLine(&result, pPdStruct, QStringLiteral("Packer: %1").arg(result.packerName));
+    logLine(&result, pPdStruct, QStringLiteral("Running emulator..."));
 
     XEmulUnpacker::OPTIONS engineOptions = unpacker->getDefaultOptions();
     if(options.maxSteps > 0) {
@@ -192,7 +190,7 @@ EmulatorUnpacker::Result EmulatorUnpacker::unpack(const Options &options, const 
     engineOptions.bReconstructImports = options.fixImports;
     engineOptions.bReconstructRelocs = options.fixRelocations;
 
-    const XEmulUnpacker::RESULT engineResult = unpacker->unpack(inputInfo.absoluteFilePath(), engineOptions);
+    const XEmulUnpacker::RESULT engineResult = unpacker->unpack(inputInfo.absoluteFilePath(), engineOptions, pPdStruct);
 
     result.method = engineResult.sMethod;
     result.oepRva = engineResult.nOEP;
@@ -203,17 +201,17 @@ EmulatorUnpacker::Result EmulatorUnpacker::unpack(const Options &options, const 
     result.apiLog = engineResult.listApiLog;
 
     if(!engineResult.bSuccess) {
-        return fail(QStringLiteral("Unpack failed: %1").arg(engineResult.sReason));
+        return failResult(&result, pPdStruct, QStringLiteral("Unpack failed: %1").arg(engineResult.sReason));
     }
 
     if(engineResult.baPE.isEmpty()) {
-        return fail(QStringLiteral("Unpack produced no image."));
+        return failResult(&result, pPdStruct, QStringLiteral("Unpack produced no image."));
     }
 
     const QString methodName = result.method.trimmed().isEmpty() ? result.packerName : result.method;
     result.outputPath = resultOutputPath(inputInfo.absoluteFilePath(), resultDirectory, methodName);
     if(result.outputPath.isEmpty()) {
-        return fail(QStringLiteral("Cannot build the output path."));
+        return failResult(&result, pPdStruct, QStringLiteral("Cannot build the output path."));
     }
 
     const QFileInfo outputInfo(result.outputPath);
@@ -228,16 +226,16 @@ EmulatorUnpacker::Result EmulatorUnpacker::unpack(const Options &options, const 
         sameFile = (inputInfo.absoluteFilePath() == outputInfo.absoluteFilePath());
     }
     if(sameFile) {
-        return fail(QStringLiteral("Output file must be different from the input file."));
+        return failResult(&result, pPdStruct, QStringLiteral("Output file must be different from the input file."));
     }
 
     QDir outputDir(outputInfo.absolutePath());
     if(!outputDir.exists() && !outputDir.mkpath(QStringLiteral("."))) {
-        return fail(QStringLiteral("Cannot create output directory: %1").arg(outputInfo.absolutePath()));
+        return failResult(&result, pPdStruct, QStringLiteral("Cannot create output directory: %1").arg(outputInfo.absolutePath()));
     }
 
     if(outputInfo.exists() && !options.forceOverwrite) {
-        return fail(QStringLiteral("Output file already exists (enable overwrite / --force): %1").arg(outputInfo.absoluteFilePath()));
+        return failResult(&result, pPdStruct, QStringLiteral("Output file already exists (enable overwrite / --force): %1").arg(outputInfo.absoluteFilePath()));
     }
 
     // The reconstructed image, plus (optionally) the original packed file's overlay -- the
@@ -254,9 +252,9 @@ EmulatorUnpacker::Result EmulatorUnpacker::unpack(const Options &options, const 
                 if((overlaySize > 0) && (overlayOffset > 0) && overlaySource.seek(overlayOffset)) {
                     const QByteArray overlay = overlaySource.read(overlaySize);
                     outputData.append(overlay);
-                    log(QStringLiteral("Overlay:  appended %1 bytes from the original file").arg(overlay.size()));
+                    logLine(&result, pPdStruct, QStringLiteral("Overlay:  appended %1 bytes from the original file").arg(overlay.size()));
                 } else {
-                    log(QStringLiteral("Overlay:  none present in the original file"));
+                    logLine(&result, pPdStruct, QStringLiteral("Overlay:  none present in the original file"));
                 }
             }
             overlaySource.close();
@@ -269,33 +267,33 @@ EmulatorUnpacker::Result EmulatorUnpacker::unpack(const Options &options, const 
     const QFileInfo finalOutputInfo(result.outputPath);
     if(finalOutputInfo.exists()) {
         if(!options.forceOverwrite) {
-            return fail(QStringLiteral("Output file already exists (enable overwrite / --force): %1").arg(finalOutputInfo.absoluteFilePath()));
+            return failResult(&result, pPdStruct, QStringLiteral("Output file already exists (enable overwrite / --force): %1").arg(finalOutputInfo.absoluteFilePath()));
         }
         if(!QFile::remove(finalOutputInfo.absoluteFilePath())) {
-            return fail(QStringLiteral("Cannot remove existing output file: %1").arg(finalOutputInfo.absoluteFilePath()));
+            return failResult(&result, pPdStruct, QStringLiteral("Cannot remove existing output file: %1").arg(finalOutputInfo.absoluteFilePath()));
         }
     }
 
     QFile outputFile(finalOutputInfo.absoluteFilePath());
     if(!outputFile.open(QIODevice::WriteOnly)) {
-        return fail(QStringLiteral("Cannot create output file: %1").arg(outputFile.errorString()));
+        return failResult(&result, pPdStruct, QStringLiteral("Cannot create output file: %1").arg(outputFile.errorString()));
     }
     if(outputFile.write(outputData) != outputData.size() || !outputFile.flush()) {
         const QString error = outputFile.errorString();
         outputFile.close();
         outputFile.remove();
-        return fail(QStringLiteral("Write failed: %1").arg(error));
+        return failResult(&result, pPdStruct, QStringLiteral("Write failed: %1").arg(error));
     }
     outputFile.close();
     result.outputSize = outputData.size();
 
     result.success = true;
-    log(QStringLiteral("OEP:      RVA 0x%1").arg(result.oepRva, 0, 16));
-    log(QStringLiteral("Method:   %1").arg(result.method));
-    log(QStringLiteral("Sections: %1").arg(result.sections));
-    log(QStringLiteral("Steps:    %1").arg(result.steps));
-    log(QStringLiteral("Output:   %1 (%2 bytes)").arg(finalOutputInfo.absoluteFilePath()).arg(result.outputSize));
-    log(QStringLiteral("Unpack completed."));
+    logLine(&result, pPdStruct, QStringLiteral("OEP:      RVA 0x%1").arg(result.oepRva, 0, 16));
+    logLine(&result, pPdStruct, QStringLiteral("Method:   %1").arg(result.method));
+    logLine(&result, pPdStruct, QStringLiteral("Sections: %1").arg(result.sections));
+    logLine(&result, pPdStruct, QStringLiteral("Steps:    %1").arg(result.steps));
+    logLine(&result, pPdStruct, QStringLiteral("Output:   %1 (%2 bytes)").arg(finalOutputInfo.absoluteFilePath()).arg(result.outputSize));
+    logLine(&result, pPdStruct, QStringLiteral("Unpack completed."));
 
     return result;
 }
