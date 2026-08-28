@@ -128,20 +128,6 @@ target_link_libraries(xuniversalunpacker PUBLIC
     Qt${XUNIVERSALUNPACKER_QT_MAJOR}::Widgets
 )
 
-# xarchive_7zip: this library compiles XARCHIVE_SOURCES, in which
-# xarchives_ip7z.cpp is unconditional (XArchive/xarchive.cmake). A static
-# library does not resolve its own externals, so the failure lands on every
-# consumer's executable link (~12 unresolved: CreateArchiver, GetIsArc,
-# GetNumberOfFormats, GetHandlerProperty2, UString::UString,
-# NWindows::NCOM::CPropVariant::*, CLimitedInStream::*). Linking it PUBLIC here
-# means each consumer gets the 7-Zip objects without repeating the line.
-# Consumers normally add_subdirectory(XArchive), which defines the target; a
-# consumer that does not gets it from algos_7zip.cmake (self-guarded, so this
-# is a no-op when the target already exists).
-if(NOT TARGET xarchive_7zip)
-    include("${XUNIVERSALUNPACKER_MYLIBS}/XArchive/algos_7zip.cmake")
-endif()
-
 # DIE detection-engine dependencies (targets from the provider add_subdirectory() calls).
 target_link_libraries(xuniversalunpacker PUBLIC
     capstone
@@ -150,7 +136,6 @@ target_link_libraries(xuniversalunpacker PUBLIC
     zlib
     ppmd
     xsimd
-    xarchive_7zip
 )
 
 if(WIN32)
