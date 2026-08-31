@@ -88,7 +88,7 @@ set_target_properties(xuniversalunpacker PROPERTIES
 
 # Feature switches the NFD scan engine needs; PUBLIC so consumers that compile engine headers
 # (e.g. the GUI's scan widget) inherit them. NOMINMAX likewise on Windows.
-target_compile_definitions(xuniversalunpacker PUBLIC USE_DEX USE_PDF USE_ARCHIVE USE_XSIMD)
+target_compile_definitions(xuniversalunpacker PUBLIC USE_ARCHIVE USE_XSIMD)
 if(WIN32)
     target_compile_definitions(xuniversalunpacker PUBLIC NOMINMAX)
 endif()
